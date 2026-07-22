@@ -13,9 +13,10 @@ class LatlonPlot:
     An Object-Oriented builder for plots.
     Assumes inputs are xarray DataArrays with 'lat' and 'lon' coordinates.
     """
-    def __init__(self, fig, subplot_pos=(1, 1, 1), central_longitude=180, font_family='Nimbus Sans', aspect=""):
+    def __init__(self, fig, subplot_pos=(1, 1, 1), font_family='', central_longitude=180, aspect=""):
         # 0. Set default font
-        plt.rcParams['font.family'] = [font_family]
+        if font_family:
+            plt.rcParams['font.family'] = [font_family]
         
         # Setup Figure and Axes
         self.fig        = fig

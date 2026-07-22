@@ -2,19 +2,19 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import matplotlib.path as mpath
+import cartopy.crs as ccrs
 
 # import matplotlib as mpl
 # import matplotlib.cm as cm
 # import matplotlib.colors as mcolors
-import cartopy.crs as ccrs
 # import cartopy.feature as cfeature
 # from   cartopy.util import add_cyclic_point
 from   cartopy.mpl.gridliner import LONGITUDE_FORMATTER, LATITUDE_FORMATTER
 
 
-from mehori_tools import LatlonPlot
+from mehori_climate import LatlonPlot
 
-class npsPlot(LatlonPlot):
+class NpsPlot(LatlonPlot):
     """
     An Object-Oriented builder for plots.
     Extends LatlonPlot
