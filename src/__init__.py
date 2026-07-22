@@ -1,6 +1,5 @@
-from .latlonPlot import latlonPlot
-from .npsPlot    import npsPlot
-# from .lathgtPlot import lathgtPlot
+from .latlon_plot   import LatlonPlot
+from .nps_plot      import NpsPlot
 from .data_handling import calc_tdiff
-
+# from .lathgtPlot import lathgtPlot
 
