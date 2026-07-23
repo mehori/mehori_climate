@@ -13,21 +13,32 @@ class LatlonPlot:
     An Object-Oriented builder for plots.
     Assumes inputs are xarray DataArrays with 'lat' and 'lon' coordinates.
     """
-    def __init__(self, fig, subplot_pos=(1, 1, 1), font_family='', central_longitude=180, aspect="", fontscale=None):
+    def __init__(self, fig, subplot_pos=(1, 1, 1), font_family='', central_longitude=180, aspect="", fontscale=None, projection=None, extent=None):
         # 0. Set default font
         if font_family:
             plt.rcParams['font.family'] = [font_family]
 
         # Setup Figure and Axes
         self.fig        = fig
-        self.projection = ccrs.PlateCarree(central_longitude=central_longitude)
-        self.transform  = ccrs.PlateCarree()
-        self.ax         = fig.add_subplot(*subplot_pos, projection=self.projection)
+        # Subclasses (e.g. NpsPlot) can pass a different cartopy projection
+        # for self.ax while still reusing all of this __init__ (fontscale,
+        # zorder, levels/cmap_name state, aspect handling, etc.) via super().
+        # projection=False opts out of cartopy entirely (plain matplotlib
+        # Axes) for non-map subclasses like LatHgtPlot.
+        if projection is False:
+            self.projection = None
+            self.transform  = None
+            self.ax         = fig.add_subplot(*subplot_pos)
+        else:
+            self.projection = projection if projection is not None else ccrs.PlateCarree(central_longitude=central_longitude)
+            self.transform  = ccrs.PlateCarree()
+            self.ax         = fig.add_subplot(*subplot_pos, projection=self.projection)
 
-        # Set aspect ratio
+        # Set aspect ratio (plain Cartesian axes default to 'auto' instead
+        # of 'equal' -- lat vs. pressure/height have unrelated units/scales)
         if aspect:
             self.ax.set_aspect(aspect)
-        else:
+        elif projection is not False:
             self.ax.set_aspect('equal')
 
         # Font scaling: text is set in absolute points, so stacking panels
@@ -44,10 +55,30 @@ class LatlonPlot:
         self.cmap_name  = None
         self.zorder     = 1
 
+        # Without an explicit extent, cartopy shows the full global view
+        # for the projection regardless of how much of the data actually
+        # has values -- add_shade() only draws data, it doesn't shrink the
+        # view to match it. Optional here so it can be set at construction
+        # time; set_extent() below covers setting/changing it afterward.
+        if extent is not None and projection is not False:
+            self.set_extent(extent)
+
     def add_cyclic(self, data):
         """Helper to add cyclic point to avoid the white line at 0 degrees."""
         data_c, lon_c = add_cyclic_point(data.values, coord=data.lon)
         return data_c, lon_c
+
+    def set_extent(self, extent, crs=None):
+        """
+        Restricts the visible map to [lon_min, lon_max, lat_min, lat_max]
+        (PlateCarree degrees by default). Chainable, so it can be called
+        any time after construction -- e.g. once the data's actual lat/lon
+        range is known:
+
+            plot1.add_shade(data).set_extent([-180, 180, 0, 90])
+        """
+        self.ax.set_extent(list(extent), crs=crs or self.transform)
+        return self
 
     def add_coastlines(self, fillland=False):
         if fillland:
@@ -188,14 +219,34 @@ class LatlonPlot:
         return self
 
     def add_vector(self, u_data, v_data, skip=2, scale=None):
-        """Extension: Adds wind/current vector arrows using quiver."""
-        # Slicing with [::skip] avoids overcrowding the map with arrows
-        self.ax.quiver(
-            lon_c[::skip], u_data.lat[::skip], 
-            u_c[::skip, ::skip], v_c[::skip, ::skip],
-            transform=self.transform,
-            scale=scale
+        # Slicing with [::skip] avoids overcrowding the map with arrows.
+        # cartopy's quiver() does raw numpy-style boolean-mask indexing
+        # internally while transforming vectors; xarray DataArrays don't
+        # support that indexing style and raise an IndexError, so pass
+        # plain numpy arrays via .values instead.
+        lon = u_data.lon.values[::skip]
+        lat = u_data.lat.values[::skip]
+        u   = u_data.values[::skip, ::skip]
+        v   = v_data.values[::skip, ::skip]
+
+        quiver_style = dict(
+            width=0.0018,           # 矢軸の太さ
+            headwidth=3,           # 矢頭の幅（矢軸の太さに対する倍率）
+            headlength=5,          # 矢頭の長さ（矢軸の太さに対する倍率）
+            headaxislength=5,    # 矢頭の根本部分の長さ
+            pivot='tail'           # 矢印の中心を座標に合わせる
         )
+
+        self.ax.quiver(
+            lon, lat, u, v,
+            facecolor="black",
+            alpha=0.7,
+            transform=self.transform,
+            scale=scale,
+            zorder=self.zorder,
+            **quiver_style
+        )
+        self.zorder += 1
         return self
 
     def add_gridlines(self, labelsize=10):
@@ -244,7 +295,7 @@ class LatlonPlot:
         cbar.ax.tick_params(labelsize=labelsize * self.fontscale)
         return self
 
-    def add_corner(self, left_text="", right_text="", fontsize=16):
+    def add_corner(self, left_text="", right_text="", fontsize=14):
         """Adds title and corner text."""
         if left_text:
             self.ax.text(0.00, 1.010, left_text, transform=self.ax.transAxes,
