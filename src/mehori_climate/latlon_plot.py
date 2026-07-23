@@ -13,11 +13,11 @@ class LatlonPlot:
     An Object-Oriented builder for plots.
     Assumes inputs are xarray DataArrays with 'lat' and 'lon' coordinates.
     """
-    def __init__(self, fig, subplot_pos=(1, 1, 1), font_family='', central_longitude=180, aspect=""):
+    def __init__(self, fig, subplot_pos=(1, 1, 1), font_family='', central_longitude=180, aspect="", fontscale=None):
         # 0. Set default font
         if font_family:
             plt.rcParams['font.family'] = [font_family]
-        
+
         # Setup Figure and Axes
         self.fig        = fig
         self.projection = ccrs.PlateCarree(central_longitude=central_longitude)
@@ -29,7 +29,16 @@ class LatlonPlot:
             self.ax.set_aspect(aspect)
         else:
             self.ax.set_aspect('equal')
-        
+
+        # Font scaling: text is set in absolute points, so stacking panels
+        # into a grid (more rows/cols -> smaller panels) makes text look
+        # relatively larger unless scaled down. Auto-derive from the
+        # subplot grid unless the caller passes an explicit value.
+        if fontscale is None:
+            nrows, ncols = subplot_pos[0], subplot_pos[1]
+            fontscale = 1.0 / max(nrows, ncols) ** 0.5
+        self.fontscale  = fontscale
+
         # State variables for colorbar
         self.levels     = None
         self.cmap_name  = None
@@ -50,19 +59,73 @@ class LatlonPlot:
         self.zorder += 1
         return self
 
-    def add_shade(self, data, vmax=5, vnum=17, color="RdBu_r", linecolor="#444", cyclic=True, withLine=False, alpha=1.0):
-        """Adds a filled contour shading layer."""
+    def _make_levels(self, vmin, vmax, vnum, symmetric, interval=None):
+        # explicit interval is given
+        if interval is not None:
+            if symmetric:
+                vabs = max(abs(vmin), abs(vmax))
+                n = int(round(vabs / interval))
+                levels_pos = np.arange(n + 1) * interval
+                levels_neg = -levels_pos[::-1]
+                return np.unique(np.concatenate([levels_neg, levels_pos]))
+            n = int(round((vmax - vmin) / interval))
+            return vmin + np.arange(n + 1) * interval
 
+        # no interval but symmetric
+        if symmetric:
+            half = vnum // 2
+            levels_neg = np.linspace(vmin, 0, half + 1)
+            levels_pos = np.linspace(0, vmax, half + 1)
+            return np.unique(np.concatenate([levels_neg, levels_pos]))
+
+        # no interval and no symmetric
+        return np.linspace(vmin, vmax, vnum)
+
+
+    def add_shade(self, data, vmin=None, vmax=None, vnum=17, interval=None,
+              color="RdBu_r", linecolor="#444", cyclic=True, withLine=False,
+              alpha=1.0, symmetric=None):
+        """Adds a filled contour shading layer.
+           vmin/vmax: explicit bounds. Leave both unset to auto-range from data.
+           Setting only vmax keeps old anomaly behavior (symmetric, vmin=-vmax).
+           vnum: number of levels (ignored if interval is given).
+           interval: fixed step between levels, e.g. interval=5 for 990,995,...,1030.
+           symmetric: force/override symmetric-about-zero levels; auto-inferred
+           if not given.
+        """
+
+        # if cyclic, add 360 point
         if cyclic:
             data_c, lon_c = self.add_cyclic(data)
         else:
             data_c, lon_c = data, data.lon
 
-        half_levels = int(vnum / 2)
-        levels_neg = np.linspace(-vmax,    0, half_levels )
-        levels_pos = np.linspace(    0, vmax, half_levels )
-        self.levels = np.unique(np.concatenate((levels_neg, levels_pos)))
+        # get data max/min 
+        dmin = float(np.nanmin(data_c))
+        dmax = float(np.nanmax(data_c))
+
+        # set shading levels
+        if vmin is not None and vmax is not None:
+            symmetric = False if symmetric is None else symmetric
+        elif vmax is not None:
+            symmetric = True  if symmetric is None else symmetric
+            vmin = -vmax
+        elif vmin is not None:
+            symmetric = False if symmetric is None else symmetric
+            vmax = dmax
+        else:
+            symmetric = (dmin < 0 < dmax) if symmetric is None else symmetric
+            if symmetric:
+                vabs = max(abs(dmin), abs(dmax))
+                vmin, vmax = -vabs, vabs
+            else:
+                vmin, vmax = dmin, dmax
+
+        # call make_levels to set them
+        self.levels = self._make_levels(vmin, vmax, vnum, symmetric, interval)
         self.cmap_name = color
+
+        # draw shading
         self.ax.contourf(
             lon_c, data.lat, data_c,
             levels=self.levels,
@@ -74,7 +137,7 @@ class LatlonPlot:
         )
         self.zorder += 1
 
-        # overlay contours
+        # draw line on top
         if withLine:
             self.ax.contour(
                 lon_c, data.lat, data_c,
@@ -82,10 +145,11 @@ class LatlonPlot:
                 colors=linecolor,
                 linewidths=0.5,
                 transform=ccrs.PlateCarree(),
-                zorder=self.zorder 
+                zorder=self.zorder
             )
         self.zorder += 1
         return self
+
 
     def add_significance_dots(self, pval, confidence=0.05):
         """
@@ -134,22 +198,41 @@ class LatlonPlot:
         )
         return self
 
-    def add_gridlines(self):
+    def add_gridlines(self, labelsize=10):
         """ Adds latitude and longitude gridlines.  """
         gl = self.ax.gridlines(draw_labels=True, linewidth=0.5, color='gray', alpha=0.5, linestyle='--')
         gl.top_labels   = False
         gl.right_labels = False
         gl.xformatter   = LONGITUDE_FORMATTER
         gl.yformatter   = LATITUDE_FORMATTER
+        gl.xlabel_style = {'size': labelsize * self.fontscale}
+        gl.ylabel_style = {'size': labelsize * self.fontscale}
         return self
 
-    def add_colorbar(self, rect=[0.263, 0.17, 0.5, 0.02]):
+    def add_colorbar(self, height=0.02, pad=0.06, width_frac=0.7, labelsize=10, rect=None):
         """
-        Adds a horizontal colorbar at the bottom.
+        Adds a horizontal colorbar below this panel's own axes.
+        By default the position/size is derived from this panel's own
+        `self.ax` (via width_frac/height/pad, all in figure-fraction units
+        scaled by self.fontscale), so each LatlonPlot instance places its
+        own colorbar under itself automatically -- panels can be stacked,
+        arranged in a grid, or resized without recalculating any x/y
+        coordinates by hand. Pass an explicit `rect=[x0, y0, w, h]`
+        (figure-fraction) to override this and position it manually.
         """
         if self.levels is None or self.cmap_name is None:
             raise ValueError("Cannot add colorbar: Call add_shade() first to set levels and colormap.")
-            
+
+        if rect is None:
+            self.fig.canvas.draw()  # finalize layout (aspect) before reading position
+            pos = self.ax.get_position()
+            h  = height * self.fontscale
+            p  = pad * self.fontscale
+            cb_width = pos.width * width_frac
+            x0 = pos.x0 + (pos.width - cb_width) / 2
+            y0 = pos.y0 - p
+            rect = [x0, y0, cb_width, h]
+
         cmap = plt.get_cmap(self.cmap_name)
         norm = mcolors.BoundaryNorm(self.levels, ncolors=cmap.N)
         fake_mappable = cm.ScalarMappable(cmap=cmap, norm=norm)
@@ -158,21 +241,29 @@ class LatlonPlot:
         cbar_ax = self.fig.add_axes(rect)
         cbar = self.fig.colorbar(fake_mappable, cax=cbar_ax, orientation='horizontal', extend='neither')
         cbar.set_ticks(self.levels[::2])
+        cbar.ax.tick_params(labelsize=labelsize * self.fontscale)
         return self
 
     def add_corner(self, left_text="", right_text="", fontsize=16):
         """Adds title and corner text."""
         if left_text:
             self.ax.text(0.00, 1.010, left_text, transform=self.ax.transAxes,
-                         fontsize=fontsize, va='bottom', ha='left', clip_on=False)
+                         fontsize=fontsize * self.fontscale, va='bottom', ha='left', clip_on=False)
         if right_text:
             self.ax.text(1.00, 1.010, right_text, transform=self.ax.transAxes,
-                         fontsize=fontsize, va='bottom', ha='right', clip_on=False)
+                         fontsize=fontsize * self.fontscale, va='bottom', ha='right', clip_on=False)
         return self
 
-    def add_title(self, title="", pad=0, fontsize=14):
+    def add_title(self, title="", pad=5, fontsize=14):
         if title:
-            self.ax.set_title(title, pad=pad, fontsize=fontsize)
+            # Uses ax.text() instead of ax.set_title(): on this cartopy
+            # GeoAxes, the dedicated Title artist from set_title() doesn't
+            # reliably get drawn (cartopy's GeoAxes.draw() override can
+            # skip it). add_corner() uses this same ax.text() approach and
+            # renders correctly, so title mirrors it for consistency.
+            y = 1.0 + pad / 500.0
+            self.ax.text(0.5, y, title, transform=self.ax.transAxes,
+                         fontsize=fontsize * self.fontscale, va='bottom', ha='center', clip_on=False)
         return self
 
     def make_clevel_cint(self, data, cint=1):
@@ -183,12 +274,21 @@ class LatlonPlot:
 
     def render(self, ofile="", close_fig=False):
         """ Finalizes layout and either saves or displays the figure.  """
-        plt.subplots_adjust(bottom=0.15) # Ensure colorbar doesn't clip
+        self.fig.subplots_adjust(bottom=0.15) # Ensure colorbar doesn't clip
         if ofile:
-            plt.savefig(ofile, dpi=300, bbox_inches="tight", transparent=False)
+            # NOTE: bbox_inches="tight" is deliberately NOT used here.
+            # It has a known bad interaction with cartopy's gridline label
+            # layout (auto_update runs the label-positioning pass twice),
+            # which crops out most of the map and leaves only a sliver plus
+            # any plain (non-geo) axes like the colorbar. subplots_adjust
+            # above handles margins instead.
+            self.fig.savefig(ofile, dpi=300, transparent=False)
         else:
+            plt.figure(self.fig.number)  # make sure self.fig is the active figure
             plt.show()
 
         # if close_fig is True, memory is cleared
         if close_fig:
-            plt.close(self.fig)  
+            plt.close(self.fig)
+
+
