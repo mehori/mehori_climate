@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 import xarray as xr
 
 # open data
-ds = xr.open_dataset('../../data/slp.djf.nc')
+ds = xr.open_dataset('../../data/slp.djf.nc', )
 
 # 0. read data
 slp = ds["psl"]

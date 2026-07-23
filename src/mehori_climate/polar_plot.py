@@ -124,4 +124,3 @@ class SpsPlot(NpsPlot):
     def add_gridlines(self, labelsize=14, ylocator=(-20, -40, -60, -80)):
         """ Overrides NpsPlot.add_gridlines(): southern-hemisphere latitude circles. """
         return super().add_gridlines(labelsize=labelsize, ylocator=ylocator)
-

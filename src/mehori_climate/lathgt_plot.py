@@ -27,9 +27,10 @@ class LatHgtPlot(LatlonPlot):
         fig.render(ofile="lathgt_map.png")
 
     `data` passed to add_shade()/add_contour() must be a 2D xarray
-    DataArray with a 'lat' dim and a vertical pressure dim (auto-detected
-    from {'level', 'lev', 'plev', 'pressure', 'pres'} unless given
-    explicitly via `lev_dim`).
+    DataArray with a latitude dim (auto-detected via the inherited
+    _lat_name(), same as LatlonPlot: 'lat' or 'latitude') and a vertical
+    pressure dim (auto-detected from {'level', 'lev', 'plev', 'pressure',
+    'pres'} unless given explicitly via `lev_dim`).
     """
 
     # Candidate names for the vertical pressure dimension, checked in
@@ -54,13 +55,24 @@ class LatHgtPlot(LatlonPlot):
         return -np.log(np.asarray(pressure, dtype=float) / 1000.0)
 
     def _detect_lev_dim(self, data):
-        for name in self._LEV_DIM_CANDIDATES:
-            if name in data.dims:
-                return name
-        raise ValueError(
-            f"Could not auto-detect a vertical pressure dimension in dims={data.dims}; "
-            f"pass lev_dim explicitly."
-        )
+        # _detect_dim() is inherited from LatlonPlot -- the same generic
+        # helper it uses for _lat_name()/_lon_name(), just with this
+        # class's own candidate list for the vertical dimension.
+        return self._detect_dim(data, self._LEV_DIM_CANDIDATES, "vertical pressure")
+
+    def _prep_lev_data(self, data, lev_dim):
+        """
+        Shared prep for add_shade()/add_contour(): resolves the vertical
+        and latitude dimension names, computes the log-pressure height
+        coordinate, and returns the values transposed to (lev_dim, lat_dim).
+        Returns (lev_dim, lat_dim, pressure, height, values).
+        """
+        lev_dim  = lev_dim or self._detect_lev_dim(data)
+        lat_dim  = self._lat_name(data)
+        pressure = data[lev_dim].values
+        height   = self._log_height(pressure)
+        values   = data.transpose(lev_dim, lat_dim).values
+        return lev_dim, lat_dim, pressure, height, values
 
     def _setup_axes(self, pressure, lat):
         """ Sets up the y-axis (log-pressure height, hPa tick labels) and
@@ -133,36 +145,19 @@ class LatHgtPlot(LatlonPlot):
     def add_shade(self, data, lev_dim=None, vmin=None, vmax=None, vnum=17, interval=None,
                   color="RdBu_r", linecolor="#444", withLine=False, alpha=1.0, symmetric=None):
         """ Adds filled contour shading. See class docstring for `data`/`lev_dim`. """
-        lev_dim  = lev_dim or self._detect_lev_dim(data)
-        pressure = data[lev_dim].values
-        height   = self._log_height(pressure)
-        values   = data.transpose(lev_dim, 'lat').values
+        lev_dim, lat_dim, pressure, height, values = self._prep_lev_data(data, lev_dim)
+        lat = data[lat_dim]
 
         dmin = float(np.nanmin(values))
         dmax = float(np.nanmax(values))
 
-        # Same level-selection logic as LatlonPlot.add_shade().
-        if vmin is not None and vmax is not None:
-            symmetric = False if symmetric is None else symmetric
-        elif vmax is not None:
-            symmetric = True if symmetric is None else symmetric
-            vmin = -vmax
-        elif vmin is not None:
-            symmetric = False if symmetric is None else symmetric
-            vmax = dmax
-        else:
-            symmetric = (dmin < 0 < dmax) if symmetric is None else symmetric
-            if symmetric:
-                vabs = max(abs(dmin), abs(dmax))
-                vmin, vmax = -vabs, vabs
-            else:
-                vmin, vmax = dmin, dmax
-
+        # Level-selection logic inherited from LatlonPlot.
+        vmin, vmax, symmetric = self._resolve_vmin_vmax(dmin, dmax, vmin, vmax, symmetric)
         self.levels    = self._make_levels(vmin, vmax, vnum, symmetric, interval)
         self.cmap_name = color
 
         self.ax.contourf(
-            data.lat, height, values,
+            lat, height, values,
             levels=self.levels, cmap=self.cmap_name, extend='both',
             alpha=alpha, zorder=self.zorder,
         )
@@ -170,30 +165,28 @@ class LatHgtPlot(LatlonPlot):
 
         if withLine:
             self.ax.contour(
-                data.lat, height, values,
+                lat, height, values,
                 levels=self.levels, colors=linecolor, linewidths=0.5,
                 zorder=self.zorder,
             )
         self.zorder += 1
 
-        self._setup_axes(pressure, data.lat.values)
+        self._setup_axes(pressure, lat.values)
         return self
 
     def add_contour(self, data, lev_dim=None, levels=10, colors="black", linewidths=1.0):
         """ Overrides LatlonPlot.add_contour(): plain (non-cartopy) line contours. """
-        lev_dim  = lev_dim or self._detect_lev_dim(data)
-        pressure = data[lev_dim].values
-        height   = self._log_height(pressure)
-        values   = data.transpose(lev_dim, 'lat').values
+        lev_dim, lat_dim, pressure, height, values = self._prep_lev_data(data, lev_dim)
+        lat = data[lat_dim]
 
         self.ax.contour(
-            data.lat, height, values,
+            lat, height, values,
             levels=levels, colors=colors, alpha=0.6, linewidths=linewidths,
             zorder=self.zorder,
         )
         self.zorder += 1
 
-        self._setup_axes(pressure, data.lat.values)
+        self._setup_axes(pressure, lat.values)
         return self
 
     def add_gridlines(self):

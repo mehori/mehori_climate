@@ -11,8 +11,18 @@ from   cartopy.mpl.gridliner import LONGITUDE_FORMATTER, LATITUDE_FORMATTER
 class LatlonPlot:
     """
     An Object-Oriented builder for plots.
-    Assumes inputs are xarray DataArrays with 'lat' and 'lon' coordinates.
+    Assumes inputs are xarray DataArrays with a latitude and a longitude
+    dimension (auto-detected from common names -- see _lat_name/_lon_name
+    -- so 'lat'/'lon' or 'latitude'/'longitude' both work).
     """
+
+    # Candidate dimension names, checked in order, for auto-detecting the
+    # lat/lon dims on any xarray DataArray passed in. Subclasses can add
+    # their own candidate lists the same way (e.g. LatHgtPlot's
+    # _LEV_DIM_CANDIDATES for the vertical dimension) and reuse _detect_dim.
+    _LAT_DIM_CANDIDATES = ('lat', 'latitude')
+    _LON_DIM_CANDIDATES = ('lon', 'longitude')
+
     def __init__(self, fig, subplot_pos=(1, 1, 1), font_family='', central_longitude=180, aspect="", fontscale=None, projection=None, extent=None):
         # 0. Set default font
         if font_family:
@@ -63,10 +73,40 @@ class LatlonPlot:
         if extent is not None and projection is not False:
             self.set_extent(extent)
 
+    def _detect_dim(self, data, candidates, kind):
+        """
+        Generic dimension-name auto-detection: returns the first name in
+        `candidates` that's actually present in data.dims. Used for lat/lon
+        here, and reused by subclasses (e.g. LatHgtPlot's vertical
+        pressure dimension) with their own candidate list.
+        """
+        for name in candidates:
+            if name in data.dims:
+                return name
+        raise ValueError(
+            f"Could not auto-detect a {kind} dimension in dims={data.dims}; "
+            f"expected one of {candidates}."
+        )
+
+    def _lat_name(self, data):
+        return self._detect_dim(data, self._LAT_DIM_CANDIDATES, "latitude")
+
+    def _lon_name(self, data):
+        return self._detect_dim(data, self._LON_DIM_CANDIDATES, "longitude")
+
     def add_cyclic(self, data):
         """Helper to add cyclic point to avoid the white line at 0 degrees."""
-        data_c, lon_c = add_cyclic_point(data.values, coord=data.lon)
+        data_c, lon_c = add_cyclic_point(data.values, coord=data[self._lon_name(data)])
         return data_c, lon_c
+
+    def _cyclic_data(self, data, cyclic=True):
+        """
+        Shared "add a cyclic (wraparound) longitude point, or don't" branch
+        used by add_shade()/add_contour(). Returns (data_2d, lon).
+        """
+        if cyclic:
+            return self.add_cyclic(data)
+        return data, data[self._lon_name(data)]
 
     def set_extent(self, extent, crs=None):
         """
@@ -112,6 +152,36 @@ class LatlonPlot:
         # no interval and no symmetric
         return np.linspace(vmin, vmax, vnum)
 
+    def _resolve_vmin_vmax(self, dmin, dmax, vmin, vmax, symmetric):
+        """
+        Shared vmin/vmax/symmetric resolution logic for add_shade(),
+        used by both LatlonPlot and LatHgtPlot (inherited):
+        - vmin and vmax both given: explicit range, not symmetric unless
+          forced via `symmetric`.
+        - only vmax given: legacy anomaly-style call, symmetric about zero
+          (vmin = -vmax) unless forced otherwise.
+        - only vmin given: explicit lower bound, upper bound taken from
+          the data's own max.
+        - neither given: auto-range from the data; symmetric about zero
+          if the data straddles zero, otherwise the data's own min/max.
+        Returns (vmin, vmax, symmetric).
+        """
+        if vmin is not None and vmax is not None:
+            symmetric = False if symmetric is None else symmetric
+        elif vmax is not None:
+            symmetric = True if symmetric is None else symmetric
+            vmin = -vmax
+        elif vmin is not None:
+            symmetric = False if symmetric is None else symmetric
+            vmax = dmax
+        else:
+            symmetric = (dmin < 0 < dmax) if symmetric is None else symmetric
+            if symmetric:
+                vabs = max(abs(dmin), abs(dmax))
+                vmin, vmax = -vabs, vabs
+            else:
+                vmin, vmax = dmin, dmax
+        return vmin, vmax, symmetric
 
     def add_shade(self, data, vmin=None, vmax=None, vnum=17, interval=None,
               color="RdBu_r", linecolor="#444", cyclic=True, withLine=False,
@@ -126,39 +196,21 @@ class LatlonPlot:
         """
 
         # if cyclic, add 360 point
-        if cyclic:
-            data_c, lon_c = self.add_cyclic(data)
-        else:
-            data_c, lon_c = data, data.lon
+        lat_name = self._lat_name(data)
+        data_c, lon_c = self._cyclic_data(data, cyclic)
 
-        # get data max/min 
+        # get data max/min
         dmin = float(np.nanmin(data_c))
         dmax = float(np.nanmax(data_c))
 
         # set shading levels
-        if vmin is not None and vmax is not None:
-            symmetric = False if symmetric is None else symmetric
-        elif vmax is not None:
-            symmetric = True  if symmetric is None else symmetric
-            vmin = -vmax
-        elif vmin is not None:
-            symmetric = False if symmetric is None else symmetric
-            vmax = dmax
-        else:
-            symmetric = (dmin < 0 < dmax) if symmetric is None else symmetric
-            if symmetric:
-                vabs = max(abs(dmin), abs(dmax))
-                vmin, vmax = -vabs, vabs
-            else:
-                vmin, vmax = dmin, dmax
-
-        # call make_levels to set them
+        vmin, vmax, symmetric = self._resolve_vmin_vmax(dmin, dmax, vmin, vmax, symmetric)
         self.levels = self._make_levels(vmin, vmax, vnum, symmetric, interval)
         self.cmap_name = color
 
         # draw shading
         self.ax.contourf(
-            lon_c, data.lat, data_c,
+            lon_c, data[lat_name], data_c,
             levels=self.levels,
             transform=self.transform,
             cmap=self.cmap_name,
@@ -171,7 +223,7 @@ class LatlonPlot:
         # draw line on top
         if withLine:
             self.ax.contour(
-                lon_c, data.lat, data_c,
+                lon_c, data[lat_name], data_c,
                 levels=self.levels,
                 colors=linecolor,
                 linewidths=0.5,
@@ -184,30 +236,38 @@ class LatlonPlot:
 
     def add_significance_dots(self, pval, confidence=0.05):
         """
-        given a p-value array overlays gray significance dots. default is 2-tailed 95% 
+        given a p-value array overlays gray significance dots. default is 2-tailed 95%
         """
+        lat_name = self._lat_name(pval)
         pval_c, lon_c = self.add_cyclic(pval)
-        mpl.rcParams['hatch.color'] = 'gray'
-        mpl.rcParams['hatch.linewidth'] = 0.5
-        self.ax.contourf(
-            lon_c, pval.lat, pval_c,
-            levels=[0, confidence, 1],
-            hatches=['..', None],
-            colors='none',
-            transform=self.transform
-        )
+        # matplotlib has no per-call hatch color, only the global rcParams,
+        # so save/restore around the draw instead of overwriting it
+        # permanently (which would otherwise leak into any other hatched
+        # plot drawn later in the same session).
+        prev_hatch_color     = mpl.rcParams['hatch.color']
+        prev_hatch_linewidth = mpl.rcParams['hatch.linewidth']
+        try:
+            mpl.rcParams['hatch.color'] = 'gray'
+            mpl.rcParams['hatch.linewidth'] = 0.5
+            self.ax.contourf(
+                lon_c, pval[lat_name], pval_c,
+                levels=[0, confidence, 1],
+                hatches=['..', None],
+                colors='none',
+                transform=self.transform
+            )
+        finally:
+            mpl.rcParams['hatch.color']     = prev_hatch_color
+            mpl.rcParams['hatch.linewidth'] = prev_hatch_linewidth
         return self
 
     def add_contour(self, data, levels=10, colors="black", linewidths=1.0, cyclic=True):
         """Extension: Adds a line contour layer."""
-        if cyclic:
-            data_c, lon_c = self.add_cyclic(data)
-        else:
-            data_c, lon_c = data, data.lon
-        print(self.levels)
+        lat_name = self._lat_name(data)
+        data_c, lon_c = self._cyclic_data(data, cyclic)
 
         self.ax.contour(
-            lon_c, data.lat, data_c,
+            lon_c, data[lat_name], data_c,
             levels=levels,
             colors=colors,
             alpha=0.6,
@@ -224,8 +284,8 @@ class LatlonPlot:
         # internally while transforming vectors; xarray DataArrays don't
         # support that indexing style and raise an IndexError, so pass
         # plain numpy arrays via .values instead.
-        lon = u_data.lon.values[::skip]
-        lat = u_data.lat.values[::skip]
+        lon = u_data[self._lon_name(u_data)].values[::skip]
+        lat = u_data[self._lat_name(u_data)].values[::skip]
         u   = u_data.values[::skip, ::skip]
         v   = v_data.values[::skip, ::skip]
 
@@ -322,24 +382,5 @@ class LatlonPlot:
         max_val = np.floor(np.max(data))
         levels = np.arange(min_val, max_val + cint, cint)
         return levels
-
-    def render(self, ofile="", close_fig=False):
-        """ Finalizes layout and either saves or displays the figure.  """
-        self.fig.subplots_adjust(bottom=0.15) # Ensure colorbar doesn't clip
-        if ofile:
-            # NOTE: bbox_inches="tight" is deliberately NOT used here.
-            # It has a known bad interaction with cartopy's gridline label
-            # layout (auto_update runs the label-positioning pass twice),
-            # which crops out most of the map and leaves only a sliver plus
-            # any plain (non-geo) axes like the colorbar. subplots_adjust
-            # above handles margins instead.
-            self.fig.savefig(ofile, dpi=300, transparent=False)
-        else:
-            plt.figure(self.fig.number)  # make sure self.fig is the active figure
-            plt.show()
-
-        # if close_fig is True, memory is cleared
-        if close_fig:
-            plt.close(self.fig)
 
 
